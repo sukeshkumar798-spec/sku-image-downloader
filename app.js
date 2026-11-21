@@ -1,6 +1,7 @@
 /* SKU Image Downloader
  * Reads "Product SKU" and "Image" columns from an Excel file, downloads each
  * image and saves it to the chosen local folder as <Product SKU>.<ext>.
+ * Supports Pause/Resume and automatic pause when the internet connection drops.
  * Failed rows can be exported as an Excel file in the same format.
  *
  * Requirements: Chrome / Edge 86+ (File System Access API). Must run inside the
@@ -9,9 +10,7 @@
 (function () {
   'use strict';
 
-  const CONCURRENCY = 2;              // parallel downloads (kept low to avoid server 503s)
-  const MAX_ATTEMPTS = 4;             // tries per image on transient errors
-  const RETRY_BASE_DELAY_MS = 2000;   // wait between retries (grows with each attempt)
+  const CONCURRENCY = 2;              // parallel downloads
   const FETCH_TIMEOUT_MS = 30000;     // max wait per image
   const IMAGE_EXTS = ['jpg', 'png', 'webp', 'gif', 'avif', 'svg', 'bmp', 'tif', 'tiff', 'heic'];
   const MIME_EXT = {
@@ -31,7 +30,9 @@
     folderName: $('folderName'),
     folderError: $('folderError'),
     start: $('start'),
+    pause: $('pause'),
     overwrite: $('overwrite'),
+    netState: $('netState'),
     bar: $('bar'),
     summary: $('summary'),
     status: $('status'),
@@ -44,28 +45,103 @@
   let headers = null;     // original header text: { sku, image }
   let dirHandle = null;   // FileSystemDirectoryHandle (save folder)
   let failedItems = [];   // rows that failed in the last run
+  let items = [];         // rows of the current run
+  let queue = [];         // rows waiting to be downloaded
+  let inFlight = 0;       // downloads currently running
   let running = false;
+
+  // Pause state
+  let paused = false;
+  let autoPaused = false;          // true when paused because internet went down
+  let resumeWaiters = [];          // promises waiting for resume
 
   // ---------- UI helpers ----------
 
-  function setStatus(msg, isError) {
+  /** kind: '' (normal), 'warn' or 'err' */
+  function setStatus(msg, kind) {
     el.status.textContent = msg || '';
-    el.status.className = isError ? 'err' : '';
+    el.status.className = kind || '';
   }
 
   function setFolderError(msg) {
     el.folderError.textContent = msg || '';
   }
 
-  function updateStartButton() {
+  function updateControls() {
     el.start.disabled = running || !excelFile || !dirHandle;
-  }
-
-  function updateFailedButton() {
+    el.pause.disabled = !running;
+    el.pause.textContent = paused ? 'Resume' : 'Pause';
     el.downloadFailed.disabled = running || failedItems.length === 0;
     el.failInfo.textContent = failedItems.length
       ? `${failedItems.length} failed row(s) ready to export`
       : '';
+  }
+
+  function updateNetState() {
+    const online = navigator.onLine;
+    el.netState.textContent = online ? 'Connected' : 'Disconnected';
+    el.netState.className = online ? 'online' : 'offline';
+  }
+
+  // ---------- Pause / resume ----------
+
+  function resumeAllWaiters() {
+    const waiters = resumeWaiters;
+    resumeWaiters = [];
+    waiters.forEach((resolve) => resolve());
+  }
+
+  function setPaused(on, reason) {
+    paused = on;
+    if (on) {
+      setStatus(
+        reason === 'offline'
+          ? 'Paused: internet connection lost. It will resume automatically when the connection returns.'
+          : 'Paused. Click Resume to continue.',
+        'warn'
+      );
+    } else {
+      resumeAllWaiters();
+      if (running) setStatus('Downloading...');
+    }
+    updateControls();
+  }
+
+  function autoPause() {
+    if (!paused) {
+      autoPaused = true;
+      setPaused(true, 'offline');
+    }
+  }
+
+  /** Workers call this before each step. Blocks while paused or offline. */
+  async function gate() {
+    while (paused) {
+      await new Promise((resolve) => resumeWaiters.push(resolve));
+    }
+    if (!navigator.onLine) {
+      autoPause();
+      await gate();
+    }
+  }
+
+  function onPauseClick() {
+    if (!running) return;
+    autoPaused = false;
+    setPaused(!paused, 'manual');
+  }
+
+  function onOffline() {
+    updateNetState();
+    if (running) autoPause();
+  }
+
+  function onOnline() {
+    updateNetState();
+    if (paused && autoPaused) {
+      autoPaused = false;
+      setPaused(false);
+    }
   }
 
   // ---------- Excel parsing ----------
@@ -104,7 +180,7 @@
       image: String(headerRow[imgCol] ?? '').trim() || 'Image'
     };
 
-    const items = [];
+    const rows = [];
     for (let r = headerIdx + 1; r < grid.length; r++) {
       const row = grid[r] || [];
       const sku = String(row[skuCol] ?? '').trim();
@@ -118,7 +194,7 @@
       }
 
       if (!sku && !url) continue; // completely empty row
-      items.push({
+      rows.push({
         excelRow: range.s.r + r + 1,
         sku,
         url,
@@ -129,7 +205,7 @@
         tr: null
       });
     }
-    return { items, headers: hdr };
+    return { items: rows, headers: hdr };
   }
 
   // ---------- Naming ----------
@@ -150,9 +226,9 @@
    *  - same SKU + same image URL  => skipped (duplicate row)
    *  - same SKU + different URL   => NAME_2, NAME_3, ...
    */
-  function prepare(items) {
+  function prepare(rows) {
     const seen = new Map(); // lower-case base -> { url, count }
-    for (const it of items) {
+    for (const it of rows) {
       if (!it.sku) { it.state = 'failed'; it.message = 'Product SKU is empty'; continue; }
 
       const base = safeFileBase(it.sku);
@@ -224,27 +300,6 @@
     }
   }
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  /** 408 / 425 / 429 / 5xx, timeouts and network errors are treated as temporary. */
-  function isTransientError(err) {
-    return /^HTTP (408|425|429|5\d\d)$/.test(err.message) ||
-      /Timeout|Failed to fetch|NetworkError/i.test(err.message);
-  }
-
-  async function downloadWithRetry(url, it) {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await downloadImage(url);
-      } catch (e) {
-        if (attempt >= MAX_ATTEMPTS || !isTransientError(e)) throw e;
-        it.message = `Retry ${attempt}/${MAX_ATTEMPTS - 1}: ${e.message}`;
-        renderRow(it);
-        await sleep(RETRY_BASE_DELAY_MS * attempt);
-      }
-    }
-  }
-
   async function fileExists(name) {
     try {
       await dirHandle.getFileHandle(name);
@@ -264,7 +319,7 @@
 
   async function processItem(it) {
     try {
-      const { blob, ext } = await downloadWithRetry(it.url, it);
+      const { blob, ext } = await downloadImage(it.url);
       const fileName = `${it.base}.${ext}`;
       it.fileName = fileName;
 
@@ -306,9 +361,10 @@
     if (!tr.parentNode) el.rows.appendChild(tr);
   }
 
-  function renderSummary(items, done) {
+  function renderSummary() {
     const count = (s) => items.filter((it) => it.state === s).length;
     const total = items.length;
+    const done = count('saved') + count('skipped') + count('failed');
     el.summary.textContent =
       `${done === total ? 'Complete' : 'Progress'}: ${done}/${total}  |  Saved: ${count('saved')}  |  Skipped: ${count('skipped')}  |  Failed: ${count('failed')}`;
     el.bar.style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
@@ -362,7 +418,7 @@
         setFolderError(`Folder picker error (${e.name}): ${e.message}`);
       }
     }
-    updateStartButton();
+    updateControls();
   }
 
   async function onExcelChosen() {
@@ -372,82 +428,105 @@
     el.rows.textContent = '';
     el.summary.textContent = '';
     el.bar.style.width = '0%';
-    updateFailedButton();
-    if (!excelFile) { el.excelInfo.textContent = ''; updateStartButton(); return; }
+    updateControls();
+    if (!excelFile) { el.excelInfo.textContent = ''; return; }
 
     try {
       const parsed = await parseExcel(excelFile);
       headers = parsed.headers;
       el.excelInfo.textContent = `${excelFile.name} - ${parsed.items.length} rows found`;
-      setStatus(parsed.items.length ? '' : 'No data rows found in the Excel file.', !parsed.items.length);
+      setStatus(parsed.items.length ? '' : 'No data rows found in the Excel file.', parsed.items.length ? '' : 'err');
     } catch (e) {
       excelFile = null;
       el.excel.value = '';
       el.excelInfo.textContent = '';
-      setStatus(e.message, true);
+      setStatus(e.message, 'err');
     }
-    updateStartButton();
+    updateControls();
+  }
+
+  /** One worker: takes rows from the queue until nothing is left. */
+  async function worker() {
+    for (;;) {
+      await gate();
+
+      if (queue.length === 0) {
+        if (inFlight === 0) return;     // nothing left and nobody else is working
+        await new Promise((r) => setTimeout(r, 250)); // another worker may re-queue a row
+        continue;
+      }
+
+      const it = queue.shift();
+      inFlight += 1;
+      await processItem(it);
+      inFlight -= 1;
+
+      // Failed because the internet went down: not a real failure, retry it after resume
+      if (it.state === 'failed' && !navigator.onLine) {
+        it.state = 'queued';
+        it.message = 'Waiting for internet connection';
+        it.fileName = '';
+        queue.unshift(it);
+        renderRow(it);
+        continue;
+      }
+
+      renderRow(it);
+      renderSummary();
+    }
   }
 
   async function run() {
     if (running || !excelFile || !dirHandle) return;
     running = true;
     failedItems = [];
-    updateStartButton();
-    updateFailedButton();
     el.rows.textContent = '';
+    updateControls();
     setStatus('Starting download...');
 
-    let items;
     try {
       ({ items, headers } = await parseExcel(excelFile)); // fresh parse
     } catch (e) {
       running = false;
-      updateStartButton();
-      setStatus(e.message, true);
+      updateControls();
+      setStatus(e.message, 'err');
       return;
     }
 
     prepare(items);
     items.forEach(renderRow);
+    queue = items.filter((it) => it.state === 'queued');
+    inFlight = 0;
+    renderSummary();
 
-    // Rows already in a final state (duplicate / invalid) are not queued again
-    const pending = items.filter((it) => it.state === 'queued');
-    let nextIndex = 0;
-    let done = items.length - pending.length;
-    renderSummary(items, done);
+    if (!navigator.onLine) autoPause();
 
-    async function worker() {
-      while (nextIndex < pending.length) {
-        const it = pending[nextIndex++];
-        await processItem(it);
-        renderRow(it);
-        done += 1;
-        renderSummary(items, done);
-      }
-    }
-
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
 
     items.forEach(renderRow);
-    renderSummary(items, items.length);
+    renderSummary();
 
     failedItems = items.filter((it) => it.state === 'failed');
     running = false;
-    updateStartButton();
-    updateFailedButton();
+    paused = false;
+    autoPaused = false;
+    updateControls();
     setStatus(
       failedItems.length
         ? `Finished, but ${failedItems.length} row(s) failed. Download the failed list from step 4.`
         : 'All done.',
-      failedItems.length > 0
+      failedItems.length ? 'err' : ''
     );
   }
 
   el.excel.addEventListener('change', onExcelChosen);
   el.pick.addEventListener('click', pickFolder);
   el.start.addEventListener('click', run);
+  el.pause.addEventListener('click', onPauseClick);
   el.downloadFailed.addEventListener('click', downloadFailedList);
-  updateStartButton();
-  updateFailedButton();
+  window.addEventListener('offline', onOffline);
+  window.addEventListener('online', onOnline);
+
+  updateNetState();
+  updateControls();
 })();

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SKU Image Downloader</title>
   <style>
-    :root { --bg:#f5f7fa; --card:#fff; --text:#1d2330; --muted:#6b7280; --line:#e2e8f0; --accent:#0f6f3c; --ok:#15803d; --warn:#b45309; --err:#b91c1c; }
+    :root { --bg:#f5f7fa; --card:#fff; --text:#1d2330; --muted:#6b7280; --line:#e2e8f0; --accent:#0f6f3c; --ok:#15803d; --warn:#b45309; --err:#b91c1c; --pause:#6b7280; }
     @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) { --bg:#0f1115; --card:#1a1d24; --text:#e6e8ec; --muted:#9aa3b2; --line:#2c313b; --accent:#34c26b; }
+      :root:not([data-theme="light"]) { --bg:#0f1115; --card:#1a1d24; --text:#e6e8ec; --muted:#9aa3b2; --line:#2c313b; --accent:#34c26b; --warn:#f59e0b; --pause:#9aa3b2; }
     }
     body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", system-ui, sans-serif; }
     main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
@@ -18,11 +18,16 @@
     .step b { min-width: 120px; }
     button { background: var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; font-size:14px; cursor:pointer; }
     button:disabled { opacity:.45; cursor:not-allowed; }
+    button.pause-btn { background: var(--pause); }
     label.check { display:flex; gap:6px; align-items:center; color: var(--muted); }
     #folderName, #excelInfo, #failInfo { color: var(--muted); word-break: break-all; }
+    #netState { font-weight: 600; }
+    #netState.online { color: var(--ok); }
+    #netState.offline { color: var(--err); }
     #status { margin: 8px 0 0; min-height: 1.5em; }
     #folderError { margin: 8px 0 0; min-height: 1.5em; color: var(--err); }
     .err { color: var(--err); }
+    .warn { color: var(--warn); }
     .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 10px; }
     .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
     #summary { margin-top: 8px; font-weight: 600; }
@@ -64,7 +69,9 @@
     <div class="step">
       <b>3. Download</b>
       <button id="start" type="button" disabled>Download images</button>
+      <button id="pause" type="button" class="pause-btn" disabled>Pause</button>
       <label class="check"><input type="checkbox" id="overwrite"> Overwrite existing files</label>
+      <span>Internet: <span id="netState"></span></span>
     </div>
     <div class="bar"><div id="bar"></div></div>
     <div id="summary"></div>
