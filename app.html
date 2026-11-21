@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SKU Image Downloader</title>
+  <style>
+    :root { --bg:#f5f7fa; --card:#fff; --text:#1d2330; --muted:#6b7280; --line:#e2e8f0; --accent:#0f6f3c; --ok:#15803d; --warn:#b45309; --err:#b91c1c; }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) { --bg:#0f1115; --card:#1a1d24; --text:#e6e8ec; --muted:#9aa3b2; --line:#2c313b; --accent:#34c26b; }
+    }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", system-ui, sans-serif; }
+    main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .step { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+    .step b { min-width: 120px; }
+    button { background: var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; font-size:14px; cursor:pointer; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    label.check { display:flex; gap:6px; align-items:center; color: var(--muted); }
+    #folderName, #excelInfo, #failInfo { color: var(--muted); word-break: break-all; }
+    #status { margin: 8px 0 0; min-height: 1.5em; }
+    #folderError { margin: 8px 0 0; min-height: 1.5em; color: var(--err); }
+    .err { color: var(--err); }
+    .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 10px; }
+    .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    #summary { margin-top: 8px; font-weight: 600; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+    td.sku { font-family: Consolas, monospace; word-break: break-all; }
+    .st-saved { color: var(--ok); font-weight: 600; }
+    .st-skipped { color: var(--warn); font-weight: 600; }
+    .st-failed { color: var(--err); font-weight: 600; }
+    .st-queued { color: var(--muted); }
+    @media (max-width: 600px) { main { padding: 16px; } .step b { width: 100%; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>SKU Image Downloader</h1>
+  <p class="sub">Upload an Excel file with "Product SKU" and "Image" columns. Each image is saved to the selected folder using its Product SKU as the file name.</p>
+
+  <section class="card">
+    <div class="step">
+      <b>1. Excel file</b>
+      <input type="file" id="excelFile" accept=".xlsx,.xlsm,.xls,.csv">
+      <span id="excelInfo"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="step">
+      <b>2. Save folder</b>
+      <button id="pickFolder" type="button">Choose folder</button>
+      <span id="folderName">No folder selected</span>
+    </div>
+    <p id="folderError"></p>
+  </section>
+
+  <section class="card">
+    <div class="step">
+      <b>3. Download</b>
+      <button id="start" type="button" disabled>Download images</button>
+      <label class="check"><input type="checkbox" id="overwrite"> Overwrite existing files</label>
+    </div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="summary"></div>
+    <p id="status"></p>
+  </section>
+
+  <section class="card">
+    <div class="step">
+      <b>4. Failed list</b>
+      <button id="downloadFailed" type="button" disabled>Download failed list (.xlsx)</button>
+      <span id="failInfo"></span>
+    </div>
+  </section>
+
+  <section class="card table-wrap">
+    <table>
+      <thead>
+        <tr><th>Excel row</th><th>Product SKU</th><th>File name</th><th>Status</th><th>Detail</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+
+<script src="lib/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

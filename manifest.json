@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "SKU Image Downloader",
+  "version": "1.0.0",
+  "description": "Excel se Product SKU ke naam par images local folder me download karein.",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "SKU Image Downloader"
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}
